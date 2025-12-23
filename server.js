@@ -75,7 +75,7 @@ wss.on("connection", (ws) => {
       let code;
       do { code = makeCode(); } while (rooms.has(code));
       const seed = makeSeed();
-      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null, startSeq: 0 });
+      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null, startSeq: 0, collectTaken: new Set(), collectCount: 0, collectSeq: 0, collectSeed: seed });
 
       // join as host
       m.code = code;
@@ -84,7 +84,7 @@ wss.on("connection", (ws) => {
       room.clients.add(ws);
       room.states.set(m.id, null);
 
-      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, startSeq: room.startSeq || 0 });
+      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, startSeq: room.startSeq || 0, collectTaken: [...(room.collectTaken||[])], collectCount: room.collectCount||0, collectSeed: room.collectSeed||room.seed });
       broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
       return;
     }
@@ -110,8 +110,13 @@ wss.on("connection", (ws) => {
         id: m.id,
         players: [...room.states.keys()],
         hostId: room.hostId,
+        startSeq: room.startSeq || 0,
         bots: room.bots || null,
+        collectTaken: [...(room.collectTaken||[])],
+        collectCount: room.collectCount || 0,
+        collectSeed: room.collectSeed || room.seed,
       });
+
 
       broadcast(code, { type: "player_joined", id: m.id }, ws);
       broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
@@ -184,7 +189,49 @@ if (msg.type === "state") {
       return;
     }
 
-    if (msg.type === "ping") {
+    
+    if (msg.type === "collect_item") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+
+      const id = String(msg.id || "");
+      if (!id) return;
+
+      if (!room.collectTaken) room.collectTaken = new Set();
+      if (typeof room.collectCount !== "number") room.collectCount = 0;
+
+      if (!room.collectTaken.has(id)) {
+        room.collectTaken.add(id);
+        room.collectCount = (room.collectCount | 0) + 1;
+      }
+
+      // Broadcast incremental update (including sender, para count ficar autoritativo)
+      broadcast(m.code, { type: "collect_taken", id, count: room.collectCount | 0 });
+      return;
+    }
+
+    if (msg.type === "reset_collectibles") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+
+      // Qualquer player pode pedir reset (quando morre) -> reseta pra todos
+      room.collectSeq = ((room.collectSeq || 0) | 0) + 1;
+      room.collectTaken = new Set();
+      room.collectCount = 0;
+
+      // Seed determinístico pra respawn dos itens sem rebuild do mapa
+      const base = (room.seed >>> 0);
+      const seq = (room.collectSeq >>> 0);
+      // Hash simples
+      room.collectSeed = (base ^ Math.imul(seq, 2654435761)) >>> 0;
+
+      broadcast(m.code, { type: "collect_reset", seed: room.collectSeed >>> 0 });
+      return;
+    }
+
+if (msg.type === "ping") {
       send(ws, { type: "pong", t: Date.now() });
       return;
     }
