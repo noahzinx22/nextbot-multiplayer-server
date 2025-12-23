@@ -75,7 +75,7 @@ wss.on("connection", (ws) => {
       let code;
       do { code = makeCode(); } while (rooms.has(code));
       const seed = makeSeed();
-      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null });
+      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null, startSeq: 0 });
 
       // join as host
       m.code = code;
@@ -84,7 +84,7 @@ wss.on("connection", (ws) => {
       room.clients.add(ws);
       room.states.set(m.id, null);
 
-      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true });
+      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, startSeq: room.startSeq || 0 });
       broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
       return;
     }
@@ -149,7 +149,20 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (msg.type === "state") {
+        if (msg.type === "start_game") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+
+      // Autoritativo: apenas o HOST pode iniciar a partida.
+      if (m.id !== room.hostId) return;
+
+      room.startSeq = ((room.startSeq || 0) | 0) + 1;
+      broadcast(m.code, { type: "start_game", seq: room.startSeq, hostId: room.hostId }, ws);
+      return;
+    }
+
+if (msg.type === "state") {
       if (!m.code) return;
       const room = rooms.get(m.code);
       if (!room) return;
