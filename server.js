@@ -14,16 +14,17 @@ function makeCode(len = 6) {
 
 function makeSeed() {
   // 32-bit unsigned
-  return Math.floor(Math.random() * 0xFFFFFFFF) >>> 0;
+  const hi = (Math.random() * 0xffffffff) >>> 0;
+  return hi >>> 0;
 }
 
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
 
-/** rooms: code -> { seed:number, clients:Set<WebSocket>, states:Map<string, any> } */
+// rooms: code -> { seed, clients:Set<ws>, states:Map<id,state>, hostId:string, bots:any|null }
 const rooms = new Map();
-/** client meta */
-const meta = new Map(); // ws -> { id, code|null, isHost:boolean }
+// meta: ws -> { id, code, isHost }
+const meta = new Map();
 
 function send(ws, obj) {
   try { ws.send(JSON.stringify(obj)); } catch {}
@@ -43,6 +44,22 @@ function newClientId() {
   return (Date.now().toString(36) + Math.random().toString(36).slice(2, 10)).toUpperCase();
 }
 
+function pickNewHost(room) {
+  // Pick first remaining ws as host
+  for (const ws of room.clients) {
+    const m = meta.get(ws);
+    if (!m) continue;
+    // reset all others
+    for (const ws2 of room.clients) {
+      const mm = meta.get(ws2);
+      if (mm) mm.isHost = (ws2 === ws);
+    }
+    room.hostId = m.id;
+    return m.id;
+  }
+  return null;
+}
+
 wss.on("connection", (ws) => {
   const id = newClientId();
   meta.set(ws, { id, code: null, isHost: false });
@@ -58,16 +75,17 @@ wss.on("connection", (ws) => {
       let code;
       do { code = makeCode(); } while (rooms.has(code));
       const seed = makeSeed();
-      rooms.set(code, { seed, clients: new Set(), states: new Map() });
+      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null });
 
       // join as host
       m.code = code;
       m.isHost = true;
-      rooms.get(code).clients.add(ws);
-      rooms.get(code).states.set(m.id, null);
+      const room = rooms.get(code);
+      room.clients.add(ws);
+      room.states.set(m.id, null);
 
-      send(ws, { type: "room_created", code, seed, id: m.id });
-      broadcast(code, { type: "room_players", players: [...rooms.get(code).states.keys()] });
+      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true });
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
       return;
     }
 
@@ -78,15 +96,29 @@ wss.on("connection", (ws) => {
         send(ws, { type: "error", error: "SALA_NAO_EXISTE" });
         return;
       }
+
       m.code = code;
-      m.isHost = false;
+      m.isHost = (room.hostId === m.id); // usually false
       room.clients.add(ws);
       room.states.set(m.id, null);
 
-      // send seed + existing players
-      send(ws, { type: "joined", code, seed: room.seed, id: m.id, players: [...room.states.keys()] });
+      // send seed + existing players + host + last bots (if any)
+      send(ws, {
+        type: "joined",
+        code,
+        seed: room.seed,
+        id: m.id,
+        players: [...room.states.keys()],
+        hostId: room.hostId,
+        bots: room.bots || null,
+      });
+
       broadcast(code, { type: "player_joined", id: m.id }, ws);
-      broadcast(code, { type: "room_players", players: [...room.states.keys()] });
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
+      if (room.bots) {
+        // ensure the new joiner gets something right away
+        send(ws, { type: "bots_state", bots: room.bots, hostId: room.hostId });
+      }
       return;
     }
 
@@ -97,13 +129,23 @@ wss.on("connection", (ws) => {
       if (room) {
         room.clients.delete(ws);
         room.states.delete(m.id);
+        const wasHost = (room.hostId === m.id);
+
+        if (room.clients.size === 0) {
+          rooms.delete(code);
+          return;
+        }
+
+        if (wasHost) {
+          const newHostId = pickNewHost(room);
+          broadcast(code, { type: "host_changed", hostId: newHostId });
+        }
+
         broadcast(code, { type: "player_left", id: m.id });
-        broadcast(code, { type: "room_players", players: [...room.states.keys()] });
-        if (room.clients.size === 0) rooms.delete(code);
+        broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
       }
       m.code = null;
       m.isHost = false;
-      send(ws, { type: "left" });
       return;
     }
 
@@ -113,6 +155,19 @@ wss.on("connection", (ws) => {
       if (!room) return;
       room.states.set(m.id, msg.state || null);
       broadcast(m.code, { type: "state", id: m.id, state: msg.state || null }, ws);
+      return;
+    }
+
+    if (msg.type === "bots_state") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+
+      // Autoritativo: apenas o HOST pode enviar estado de bots.
+      if (m.id !== room.hostId) return;
+
+      room.bots = msg.bots || null;
+      broadcast(m.code, { type: "bots_state", bots: room.bots, hostId: room.hostId }, ws);
       return;
     }
 
@@ -126,14 +181,26 @@ wss.on("connection", (ws) => {
     const m = meta.get(ws);
     meta.delete(ws);
     if (!m || !m.code) return;
+
     const code = m.code;
     const room = rooms.get(code);
     if (room) {
       room.clients.delete(ws);
       room.states.delete(m.id);
+
+      if (room.clients.size === 0) {
+        rooms.delete(code);
+        return;
+      }
+
+      const wasHost = (room.hostId === m.id);
+      if (wasHost) {
+        const newHostId = pickNewHost(room);
+        broadcast(code, { type: "host_changed", hostId: newHostId });
+      }
+
       broadcast(code, { type: "player_left", id: m.id });
-      broadcast(code, { type: "room_players", players: [...room.states.keys()] });
-      if (room.clients.size === 0) rooms.delete(code);
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
     }
   });
 });
