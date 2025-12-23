@@ -75,7 +75,7 @@ wss.on("connection", (ws) => {
       let code;
       do { code = makeCode(); } while (rooms.has(code));
       const seed = makeSeed();
-      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null });
+      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null, config: { difficulty: 0, noahEnabled: false } });
 
       // join as host
       m.code = code;
@@ -84,7 +84,7 @@ wss.on("connection", (ws) => {
       room.clients.add(ws);
       room.states.set(m.id, null);
 
-      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true });
+      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, config: room.config || null });
       broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
       return;
     }
@@ -111,6 +111,7 @@ wss.on("connection", (ws) => {
         players: [...room.states.keys()],
         hostId: room.hostId,
         bots: room.bots || null,
+        config: room.config || null,
       });
 
       broadcast(code, { type: "player_joined", id: m.id }, ws);
@@ -119,10 +120,45 @@ wss.on("connection", (ws) => {
         // ensure the new joiner gets something right away
         send(ws, { type: "bots_state", bots: room.bots, hostId: room.hostId });
       }
+      if (room.config) {
+        send(ws, { type: \"room_config\", config: room.config, hostId: room.hostId });
+      }
       return;
     }
 
-    if (msg.type === "leave_room") {
+    
+    if (msg.type === "room_config") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+      // Only host can change config
+      if (room.hostId !== m.id) return;
+
+      const cfgIn = msg.config || {};
+      const next = Object.assign({}, room.config || {});
+      if (Object.prototype.hasOwnProperty.call(cfgIn, "difficulty")) {
+        const d = Number(cfgIn.difficulty);
+        next.difficulty = Number.isFinite(d) ? Math.max(0, Math.min(2, Math.floor(d))) : 0;
+      }
+      if (Object.prototype.hasOwnProperty.call(cfgIn, "noahEnabled")) {
+        next.noahEnabled = !!cfgIn.noahEnabled;
+      }
+      room.config = next;
+      broadcast(m.code, { type: "room_config", config: room.config, hostId: room.hostId }, ws);
+      return;
+    }
+
+    if (msg.type === "start_game") {
+      if (!m.code) return;
+      const room = rooms.get(m.code);
+      if (!room) return;
+      if (room.hostId !== m.id) return;
+      // Broadcast a synced start signal
+      broadcast(m.code, { type: "start_game", hostId: room.hostId, serverTime: Date.now(), delayMs: 250 }, null);
+      return;
+    }
+
+if (msg.type === "leave_room") {
       if (!m.code) return;
       const code = m.code;
       const room = rooms.get(code);
@@ -138,7 +174,7 @@ wss.on("connection", (ws) => {
 
         if (wasHost) {
           const newHostId = pickNewHost(room);
-          broadcast(code, { type: "host_changed", hostId: newHostId });
+          broadcast(code, { type: "host_changed", hostId: newHostId, config: room.config || null });
         }
 
         broadcast(code, { type: "player_left", id: m.id });
@@ -196,7 +232,7 @@ wss.on("connection", (ws) => {
       const wasHost = (room.hostId === m.id);
       if (wasHost) {
         const newHostId = pickNewHost(room);
-        broadcast(code, { type: "host_changed", hostId: newHostId });
+        broadcast(code, { type: "host_changed", hostId: newHostId, config: room.config || null });
       }
 
       broadcast(code, { type: "player_left", id: m.id });
