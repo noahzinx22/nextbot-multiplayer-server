@@ -5,6 +5,8 @@ import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 
+const MAX_PLAYERS = 5;
+
 function makeCode(len = 6) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
@@ -75,7 +77,7 @@ wss.on("connection", (ws) => {
       let code;
       do { code = makeCode(); } while (rooms.has(code));
       const seed = makeSeed();
-      rooms.set(code, { seed, clients: new Set(), states: new Map(), hostId: m.id, bots: null, startSeq: 0, collectTaken: new Set(), collectCount: 0, collectSeq: 0, collectSeed: seed });
+      rooms.set(code, { seed, maxPlayers: MAX_PLAYERS, clients: new Set(), states: new Map(), hostId: m.id, bots: null, startSeq: 0, collectTaken: new Set(), collectCount: 0, collectSeq: 0, collectSeed: seed });
 
       // join as host
       m.code = code;
@@ -84,8 +86,8 @@ wss.on("connection", (ws) => {
       room.clients.add(ws);
       room.states.set(m.id, null);
 
-      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, startSeq: room.startSeq || 0, collectTaken: [...(room.collectTaken||[])], collectCount: room.collectCount||0, collectSeed: room.collectSeed||room.seed });
-      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
+      send(ws, { type: "room_created", code, seed, id: m.id, hostId: room.hostId, isHost: true, maxPlayers: room.maxPlayers || MAX_PLAYERS, playerCount: room.states.size, startSeq: room.startSeq || 0, collectTaken: [...(room.collectTaken||[])], collectCount: room.collectCount||0, collectSeed: room.collectSeed||room.seed });
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId, maxPlayers: room.maxPlayers || MAX_PLAYERS, playerCount: room.states.size });
       return;
     }
 
@@ -94,6 +96,13 @@ wss.on("connection", (ws) => {
       const room = rooms.get(code);
       if (!room) {
         send(ws, { type: "error", error: "SALA_NAO_EXISTE" });
+        return;
+      }
+
+      // room capacity
+      const maxP = (room.maxPlayers || MAX_PLAYERS) | 0;
+      if (room.states.size >= maxP) {
+        send(ws, { type: "room_full", code, maxPlayers: maxP, playerCount: room.states.size });
         return;
       }
 
@@ -110,6 +119,8 @@ wss.on("connection", (ws) => {
         id: m.id,
         players: [...room.states.keys()],
         hostId: room.hostId,
+        maxPlayers: room.maxPlayers || MAX_PLAYERS,
+        playerCount: room.states.size,
         startSeq: room.startSeq || 0,
         bots: room.bots || null,
         collectTaken: [...(room.collectTaken||[])],
@@ -119,7 +130,7 @@ wss.on("connection", (ws) => {
 
 
       broadcast(code, { type: "player_joined", id: m.id }, ws);
-      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId, maxPlayers: room.maxPlayers || MAX_PLAYERS, playerCount: room.states.size });
       if (room.bots) {
         // ensure the new joiner gets something right away
         send(ws, { type: "bots_state", bots: room.bots, hostId: room.hostId });
@@ -147,7 +158,7 @@ wss.on("connection", (ws) => {
         }
 
         broadcast(code, { type: "player_left", id: m.id });
-        broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
+        broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId, maxPlayers: room.maxPlayers || MAX_PLAYERS, playerCount: room.states.size });
       }
       m.code = null;
       m.isHost = false;
@@ -260,7 +271,7 @@ if (msg.type === "ping") {
       }
 
       broadcast(code, { type: "player_left", id: m.id });
-      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId });
+      broadcast(code, { type: "room_players", players: [...room.states.keys()], hostId: room.hostId, maxPlayers: room.maxPlayers || MAX_PLAYERS, playerCount: room.states.size });
     }
   });
 });
